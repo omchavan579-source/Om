@@ -1,0 +1,72 @@
+# .drivesync-ignore — what never syncs, in either direction.
+#
+# rclone "filter file" syntax. One rule per line:
+#
+#   - pattern        exclude
+#   + pattern        include again (un-hides something)
+#   # or ;           comment (whole line only — there are no inline comments)
+#
+# Rules are matched in order, first match wins, and a path that matches
+# nothing is included.
+#
+#   /name            only at the top level of the sync
+#   name             at the end of a path, at any depth (dir/name too)
+#   *                any run of characters except  /
+#   **               any run of characters including /
+#   dir/             a directory rule — excludes the whole tree
+#
+# IMPORTANT: quotes are NOT special here. Write  - *.tmp  and never  - "*.tmp".
+# Everything after the rule is part of the pattern, comments included.
+#
+# Edit this file whenever you like: the next run notices the change and does a
+# one-off "resync" (which copies files, and never deletes any).
+
+# --- The sync's own plumbing ------------------------------------------------
+# Git's internals: listed here for completeness, but scripts/drive-sync.sh
+# hard-codes this rule, so removing the line here will NOT start syncing .git
+# (and that is very much on purpose — Google Drive corrupts Git repositories).
+- /.git/**
+- /.github/
+- /scripts/
+- /.drivesync-ignore
+- /.gitignore
+- /.gitattributes
+- /.gitmodules
+
+# --- Dependency and build output -------------------------------------------
+- /node_modules/
+- /.venv/
+- /venv/
+- /env/
+- /__pycache__/
+- /.pytest_cache/
+- /dist/
+- /build/
+- /target/
+- /.next/
+- /.cache/
+- /vendor/
+
+# --- OS and editor noise ----------------------------------------------------
+- .DS_Store
+- desktop.ini
+- Thumbs.db
+- ~$*
+- *.tmp
+- *.bak
+- *.swp
+- *.swo
+- /.idea/
+- /.vscode/
+
+# --- Secrets: never let these travel in either direction --------------------
+# GitHub would show them to anyone who can read the repo; Drive would too.
+- *.pem
+- *.key
+- *.p12
+- /.env
+- /.env.*
+- id_rsa*
+- credentials.json
+- *service-account*.json
+- /token.json
