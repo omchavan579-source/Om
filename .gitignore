@@ -1,0 +1,10 @@
+# OS / editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+.idea/
+.vscode/
+
+# Belt and braces: bisync drops a hash of its filters file next to it.
+.drivesync-ignore.md5

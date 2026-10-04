@@ -1,0 +1,156 @@
+# Drive <-> GitHub two-way sync.
+#
+# Setup instructions: README.md  (section "Set it up")
+# Credential instructions: docs/setup-drive-credentials.md
+#
+# Runs automatically every 6 hours, and on demand from the Actions tab.
+
+name: Drive sync
+
+on:
+  schedule:
+    # Every 6 hours (UTC). GitHub may delay scheduled runs by a few minutes.
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      direction:
+        description: "Which way should files flow?"
+        type: choice
+        default: two-way
+        options:
+          - two-way
+          - pull
+          - push
+      resync:
+        description: "Two-way only: re-baseline both sides (first run, or after a filter change)"
+        type: boolean
+        default: false
+      dry_run:
+        description: "Dry run: show what would change, without changing anything"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# Never let two syncs fight over the same repo state.
+concurrency:
+  group: drive-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync with Google Drive
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    env:
+      # 'two-way' | 'pull' | 'push'
+      SYNC_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.direction || 'two-way' }}
+      RESYNC: ${{ github.event_name == 'workflow_dispatch' && inputs.resync || 'false' }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+      # Optional tuning — change these here, or set them as repo *variables*
+      # (Settings -> Secrets and variables -> Actions -> Variables).
+      DRIVE_REMOTE: ${{ vars.DRIVE_REMOTE || 'gdrive' }}
+      DRIVE_PATH: ${{ vars.DRIVE_PATH }}
+      DRIVE_MAX_SIZE: ${{ vars.DRIVE_MAX_SIZE || '45MiB' }}
+      DRIVE_MAX_DELETE_PERCENT: ${{ vars.DRIVE_MAX_DELETE_PERCENT || '10' }}
+      DRIVE_CONFLICT_RESOLVE: ${{ vars.DRIVE_CONFLICT_RESOLVE || 'none' }}
+      DRIVE_RESYNC_MODE: ${{ vars.DRIVE_RESYNC_MODE || 'newer' }}
+      DRIVE_FORCE: ${{ vars.DRIVE_FORCE || 'false' }}
+      # true = leave Google Docs/Sheets/Slides out of the sync (see README).
+      DRIVE_SKIP_GDOCS: ${{ vars.DRIVE_SKIP_GDOCS || 'true' }}
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check that Drive credentials exist
+        env:
+          RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
+          GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
+        run: |
+          if [ -z "${RCLONE_CONF_B64}${GDRIVE_SA_JSON}" ]; then
+            echo "::error title=Google Drive is not connected::Add the RCLONE_CONF_B64 secret (or GDRIVE_SA_JSON + GDRIVE_FOLDER_ID) in Settings -> Secrets and variables -> Actions. See docs/setup-drive-credentials.md"
+            exit 1
+          fi
+
+      - name: Install rclone
+        run: |
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          rclone version
+
+      - name: Restore sync state
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/rclone
+          # run_id makes the saved state unique; restore-keys grabs the newest one.
+          key: rclone-bisync-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            rclone-bisync-
+
+      - name: Write Drive credentials
+        env:
+          RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
+          GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
+          GDRIVE_FOLDER_ID: ${{ vars.GDRIVE_FOLDER_ID }}
+          GDRIVE_TEAM_DRIVE: ${{ vars.GDRIVE_TEAM_DRIVE }}
+        run: bash scripts/configure-rclone.sh
+
+      - name: Run the sync
+        id: sync
+        env:
+          RCLONE_CONF_PATH: ~/.config/rclone/rclone.conf
+        run: |
+          args=(--mode="$SYNC_MODE")
+          if [ "$RESYNC" = "true" ]; then args+=(--resync); fi
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          bash scripts/drive-sync.sh "${args[@]}"
+
+      - name: Save sync state
+        # Only after a successful run — a failed run's half-written state would
+        # be worse than no state at all.
+        if: ${{ success() }}
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/rclone
+          key: rclone-bisync-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Commit synced files
+        if: ${{ success() && env.DRY_RUN != 'true' }}
+        run: |
+          set -euo pipefail
+          git config user.name  "drive-sync[bot]"
+          git config user.email "drive-sync[bot]@users.noreply.github.com"
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing changed in the repository this run."
+            exit 0
+          fi
+
+          echo "Files changed:"
+          git diff --cached --stat | tail -20
+
+          git commit -m "Sync with Google Drive ($(date -u '+%Y-%m-%d %H:%M UTC'))"
+
+          # A sync can be long; rebase in case someone pushed while we worked.
+          git pull --rebase --autostash origin "${{ github.ref_name }}"
+          git push origin "HEAD:${{ github.ref_name }}"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Drive sync: $SYNC_MODE"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Mode | \`$SYNC_MODE\` |"
+            echo "| Resync | \`$RESYNC\` |"
+            echo "| Dry run | \`$DRY_RUN\` |"
+            echo "| Drive folder | \`${DRIVE_REMOTE}:${DRIVE_PATH}\` |"
+            echo "| Result | ${{ steps.sync.outcome || 'skipped' }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
